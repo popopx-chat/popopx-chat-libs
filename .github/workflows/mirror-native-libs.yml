@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: Verify the upstream assets against our pins without publishing
+        description: Compare upstream's recorded digests with our pins, publish nothing
         type: boolean
         default: false
       chat_ref:

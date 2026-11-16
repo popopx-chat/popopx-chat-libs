@@ -2,14 +2,18 @@
 """Re-host upstream's published native libraries under the asset names this fork's SDKs request.
 
 Nothing is built here. Every byte is the file simplex-chat/simplex-chat-libs published
-for the same tag, and the only authority for what we publish is the digest our own
-SDKs pin: a download whose sha256 does not equal that pin is deleted before it can
-be uploaded, so the job cannot publish a byte no consumer of these releases asked
-for. Run it again after scripts/ci/packages_release.py moves a pin and the new
-version appears here.
+for the same tag, and the only authority for what we publish is the digest our own SDKs
+pin: the same value the SDK compares the downloaded asset against, so a file this job
+accepts is exactly a file a consumer of these releases asks for.
 
-The release notes are written from the same data, which is why they can state
-provenance instead of implying the build happened in this repository.
+Two gates, before any byte is uploaded:
+
+1. upstream's release record must state a sha256 equal to our pin for that asset, and
+2. the downloaded file's own sha256 must equal it too.
+
+Either one failing stops the job. Run it again after scripts/ci/packages_release.py
+moves a pin and the new version appears here; an asset already published with the
+pinned digest is left alone.
 """
 
 from __future__ import annotations
@@ -49,9 +53,9 @@ def read(url: str) -> str:
 def pins() -> dict[tuple[str, str], str]:
     """(tag, asset) -> sha256, taken from the two SDKs that download these files.
 
-    Keyed by the pair because core-7.1.0.14 and core-7.1.0.20 share five asset
-    names with different digests, and the nodejs file pins both .zip and .node
-    assets under different release tags.
+    Keyed by the pair because core-7.1.0.14 and core-7.1.0.20 share five asset names
+    with different digests, and the nodejs file pins both .zip and .node assets under
+    different release tags.
     """
     want: dict[tuple[str, str], str] = {}
     node = read(PINS["nodejs"])
@@ -75,8 +79,25 @@ def pins() -> dict[tuple[str, str], str]:
 
 
 def sha256(path: Path) -> str:
-    done = run(["sha256sum", str(path)])
-    return done.stdout.split()[0]
+    return run(["sha256sum", str(path)]).stdout.split()[0]
+
+
+def api(path: str) -> dict:
+    done = run(["gh", "api", path], check=False)
+    return json.loads(done.stdout) if done.returncode == 0 else {}
+
+
+def our_release(tag: str) -> dict:
+    return api(f"repos/{OUR_REPO}/releases/tags/{tag}")
+
+
+def upstream_release(tag: str) -> dict:
+    return api(f"repos/{UPSTREAM}/releases/tags/{tag}")
+
+
+def recorded_digest(asset: dict, digest: str) -> bool:
+    """Whether GitHub's own release record already proves these are the pinned bytes."""
+    return (asset.get("digest") or "").removeprefix("sha256:") == digest
 
 
 def download(upstream_asset: str, tag: str, target: Path) -> None:
@@ -85,23 +106,10 @@ def download(upstream_asset: str, tag: str, target: Path) -> None:
          "--retry-delay", "5", "--max-time", "900", "-o", str(target), url], capture=False)
 
 
-def release(tag: str) -> dict:
-    done = run(["gh", "api", f"repos/{OUR_REPO}/releases/tags/{tag}"], check=False)
-    return json.loads(done.stdout) if done.returncode == 0 else {}
-
-
-def digest_matches(record: dict, digest: str) -> bool:
-    """Whether an asset we already publish is proven to be the pinned bytes by the
-    digest GitHub recorded for it. Without that field the asset proves nothing, so
-    it is fetched again rather than trusted."""
-    return (record.get("digest") or "").removeprefix("sha256:") == digest
-
-
-def notes(tag: str, published: list[tuple[str, int, str]]) -> str:
-    platforms = ", ".join(sorted(name.split("popopx-chat-libs-")[1].split(".zip")[0]
-                                 if "popopx-chat-libs-" in name else name.split("popopx-chat-nodejs-")[1].split(".node")[0]
-                                 for name, _, _ in published))
-    rows = "\n".join(f"| `{name}` | {size} | `{digest}` |" for name, size, digest in published)
+def notes(tag: str, planned: list[tuple[str, int, str]]) -> str:
+    platforms = ", ".join(sorted(re.sub(r"popopx-chat-(libs|nodejs)-", "", name).rsplit(".", 1)[0]
+                                 for name, _, _ in planned))
+    rows = "\n".join(f"| `{name}` | {size} | `{digest}` |" for name, size, digest in planned)
     return f"""POPOPX mirror of SimpleX Chat's prebuilt native libraries ({platforms}).
 
 Nothing was built here. Each asset below is the byte-for-byte file `{UPSTREAM}` published
@@ -112,8 +120,8 @@ The libraries inside still carry upstream's own file names and symbols - `libsim
 Publishing is gated on the digests this fork pins in
 `packages/popopx-chat-nodejs/src/release.ts` and
 `packages/popopx-chat-python/src/simplex_chat/_version.py`: `scripts/mirror_native_libs.py`
-downloads each asset, compares its sha256 with the pin, and deletes the file rather than
-publishing it if they differ.
+checks upstream's own recorded digest for each asset, then the sha256 of the file it
+downloaded, and stops rather than publishing anything if either differs from the pin.
 
 | asset | bytes | sha256 |
 | --- | --- | --- |
@@ -125,13 +133,15 @@ tree at <https://github.com/{CHAT_REPO}>.
 """
 
 
-def edit_release(tag: str, body: str, title: str) -> None:
-    notes_file = OUT / "notes.md"
+def write_notes(tag: str, body: str, title: str) -> None:
+    notes_file = OUT / f"{tag}-notes.md"
     notes_file.write_text(body)
-    if release(tag):
+    if our_release(tag):
         run(["gh", "release", "edit", tag, "--title", title, "--notes-file", str(notes_file)])
     else:
-        run(["gh", "release", "create", tag, "--title", title, "--notes-file", str(notes_file), "--target", "master"])
+        branch = api(f"repos/{OUR_REPO}").get("default_branch", "master")
+        run(["gh", "release", "create", tag, "--title", title, "--notes-file", str(notes_file),
+             "--target", branch])
 
 
 def main() -> int:
@@ -142,31 +152,50 @@ def main() -> int:
         by_tag.setdefault(tag, {})[asset] = digest
     print(f"{len(want)} pinned asset(s) across {len(by_tag)} release tag(s), dry_run={DRY}", flush=True)
 
+    plans: dict[str, list[tuple[str, int, str]]] = {}
     for tag in sorted(by_tag):
-        existing = {} if DRY else release(tag)
-        published: list[tuple[str, int, str]] = []
+        source = upstream_release(tag)
+        if not source:
+            raise SystemExit(f"{UPSTREAM} has no release for {tag} - nothing to mirror")
+        remote = {asset["name"]: asset for asset in source.get("assets", [])}
         for asset, digest in sorted(by_tag[tag].items()):
-            target = OUT / asset
-            record = next((a for a in existing.get("assets", []) if a["name"] == asset), None)
-            if record and digest_matches(record, digest):
-                published.append((asset, record["size"], digest))
-                print(f"keep {asset}: GitHub recorded the pinned digest", flush=True)
-                continue
             upstream_asset = asset.replace("popopx-", "simplex-", 1)
-            print(f"fetch {tag}/{upstream_asset} -> {asset}", flush=True)
-            download(upstream_asset, tag, target)
+            record = remote.get(upstream_asset)
+            if not record:
+                raise SystemExit(f"{UPSTREAM}/{tag} has no asset {upstream_asset}")
+            if not recorded_digest(record, digest):
+                raise SystemExit(f"REFUSED {tag}/{upstream_asset}: upstream recorded "
+                                 f"{record.get('digest')} but our SDK pins {digest}")
+            plans.setdefault(tag, []).append((asset, record["size"], digest))
+        print(f"gate {tag}: {len(plans[tag])} asset(s) match the pins upstream-side", flush=True)
+    if DRY:
+        print("dry run: nothing downloaded, nothing published", flush=True)
+        return 0
+
+    for tag in sorted(plans):
+        title = f"{tag} (mirror of {UPSTREAM})"
+        # The release has to exist before an asset can be attached to it, and the notes
+        # are already complete: the table is built from the pinned digests and upstream's
+        # sizes, both verified above, not from what this loop happened to upload.
+        write_notes(tag, notes(tag, plans[tag]), title)
+        existing = our_release(tag)
+        for asset, size, digest in plans[tag]:
+            published = next((a for a in existing.get("assets", []) if a["name"] == asset), None)
+            if published and recorded_digest(published, digest) and published["size"] == size:
+                print(f"keep {tag}/{asset}", flush=True)
+                continue
+            print(f"fetch {tag}/{asset.replace('popopx-', 'simplex-', 1)} -> {asset}", flush=True)
+            target = OUT / asset
+            download(asset.replace("popopx-", "simplex-", 1), tag, target)
             got = sha256(target)
             if got != digest:
-                target.unlink()
-                raise SystemExit(f"REFUSED {asset}: sha256 {got} does not match the pin {digest}")
-            size = target.stat().st_size
-            published.append((asset, size, digest))
-            if not DRY:
-                run(["gh", "release", "upload", tag, str(target), "--clobber"])
-        title = f"{tag} (mirror of {UPSTREAM})"
-        print(f"--- {tag}: {len(published)} asset(s)", flush=True)
-        if not DRY:
-            edit_release(tag, notes(tag, published), title)
+                raise SystemExit(f"REFUSED {tag}/{asset}: downloaded sha256 {got}, pin {digest}")
+            if target.stat().st_size != size:
+                raise SystemExit(f"REFUSED {tag}/{asset}: downloaded {target.stat().st_size} bytes, release says {size}")
+            run(["gh", "release", "upload", tag, str(target), "--clobber"])
+            target.unlink()
+            print(f"published {tag}/{asset} ({size} bytes)", flush=True)
+        write_notes(tag, notes(tag, plans[tag]), title)
     return 0
 
 
