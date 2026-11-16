@@ -1,0 +1,34 @@
+name: mirror native libraries
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Verify the upstream assets against our pins without publishing
+        type: boolean
+        default: false
+      chat_ref:
+        description: popopx-chat ref whose pin files are the authority
+        type: string
+        default: master
+
+concurrency: mirror-native-libs
+
+permissions:
+  contents: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      DRY_RUN: ${{ inputs.dry_run }}
+      CHAT_REF: ${{ inputs.chat_ref }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Mirror and publish
+        run: python3 scripts/mirror_native_libs.py

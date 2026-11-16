@@ -9,8 +9,8 @@ This repository is used for downloads by POPOPX Chat's SDK libraries:
   fetches `popopx-chat-libs-<platform>.zip` from the tag `core-<version>`.
 
 Each SDK downloads one asset per platform (`linux-x86_64`, `linux-aarch64`, `macos-x86_64`,
-`macos-aarch64`, `windows-x86_64`) and refuses the file unless its SHA-256 equals the digest pinned in
-this fork's source tree: `packages/popopx-chat-nodejs/src/release.ts` and
+`macos-aarch64`, `windows-x86_64`, plus the `linux-x86_64-postgres` build) and refuses the file unless its
+SHA-256 equals the digest pinned in this fork's source tree: `packages/popopx-chat-nodejs/src/release.ts` and
 `packages/popopx-chat-python/src/simplex_chat/_version.py`. Those pins are written by
 `scripts/ci/packages_release.py`, never by hand.
 
@@ -25,6 +25,15 @@ release in this repository is such a mirror; a fork-built release will state tha
 Licence: AGPL-3.0-only (`LICENSE`), the licence of the sources these binaries are built from. Corresponding
 source: upstream's `simplex-chat` and `simplexmq` releases for the version in the tag, and this fork's AGPL
 source tree at <https://github.com/popopx-chat/popopx-chat>.
+
+## How the mirrors are made
+
+`.github/workflows/mirror-native-libs.yml` (dispatch-only, no secrets - it publishes to this repository with
+the job's own token) reads the two pin files out of the `popopx-chat` tree, downloads each pinned asset from
+upstream's release of the same tag, compares its sha256 with the pin, and only then uploads it here under the
+`popopx-chat-*` name the SDKs ask for. A file whose digest does not match is deleted, not published, and each
+release's notes are generated from the same data, so they cannot claim more than the job proved. Re-run it after
+`scripts/ci/packages_release.py` moves a pin.
 
 ## releases.toml
 
