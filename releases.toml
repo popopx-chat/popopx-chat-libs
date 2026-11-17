@@ -1,2 +1,4 @@
-[core.master]
-"7.1.2.0" = "3dd7049ab94e6c64d7941a586d69f2fa5ef9cf38"
+# Releases published by this repository's own lane: [core/<branch>] maps a core version to the
+# chat commit it was claimed at; [npm/<name>] and [pypi/<name>] map a package version likewise.
+# scripts/ci/packages_release.py rewrites this file, so comments do not survive its first commit.
+# Reset 2026-11-17: the inherited upstream history is blob aa35f4beaf6eee7a84fcad7411ea00c3c9f903ba.
